@@ -989,7 +989,6 @@ declare module 'klasa' {
 
 	class Util {
 		public static arrayFromObject<T = any>(obj: Record<string, any>, prefix?: string): Array<T>;
-		public static arraysStrictEquals(arr1: any[], arr2: any[]): boolean;
 		public static chunk<T>(entries: T[], chunkSize: number): Array<T[]>;
 		public static clean(text: string): string;
 		public static codeBlock(lang: string, expression: string | number | Stringifible): string;
@@ -1227,8 +1226,7 @@ declare module 'klasa' {
 
 	export interface SettingsFolderUpdateOptions extends SettingsFolderResetOptions {
 		guild?: GuildResolvable;
-		arrayAction?: 'add' | 'remove' | 'auto' | 'overwrite';
-		arrayIndex?: number;
+		action?: 'add' | 'remove' | 'auto' | 'overwrite';
 	}
 
 	export interface SettingsFolderUpdateResult {

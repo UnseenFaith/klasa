@@ -1,5 +1,5 @@
-const { isObject, objectToTuples, arraysStrictEquals, toTitleCase, mergeObjects, makeObject, resolveGuild } = require('../util/util');
-const SettingsArray = require('./group/SettingsArray');
+const { isObject, objectToTuples, toTitleCase, mergeObjects, makeObject, resolveGuild } = require('../util/util');
+const GroupBase = require('./group/GroupBase');
 const Type = require('../util/Type');
 
 /**
@@ -17,8 +17,6 @@ class SettingsFolder extends Map {
 	/**
 	 * @typedef {SettingsFolderResetOptions} SettingsFolderUpdateOptions
 	 * @property {GuildResolvable} [guild = null] The guild for context in this update
-	 * @property {('add'|'remove'|'auto'|'overwrite')} [arrayAction = 'auto'] The array action to take when updating an array
-	 * @property {number} [arrayIndex = null] The array index to insert the new element in
 	 */
 
 	/**
@@ -81,8 +79,12 @@ class SettingsFolder extends Map {
 	 * const channel = message.guild.settings.get('channels.moderation-logs');
 	 */
 	get(path) {
-		// Map.prototype.get.call was used to avoid infinite recursion
-		return path.split('.').reduce((folder, key) => Map.prototype.get.call(folder, key), this);
+		try {
+			// Map.prototype.get.call was used to avoid infinite recursion
+			return path.split('.').reduce((folder, key) => Map.prototype.get.call(folder, key), this);
+		} catch {
+			return undefined;
+		}
 	}
 
 	/**
@@ -198,7 +200,8 @@ class SettingsFolder extends Map {
 		// Queue updates
 		const results = [];
 		for (const [path, entry] of values) {
-			if (entry.array ? arraysStrictEquals(this.get(path), entry.default) : this.get(path) === entry.default) continue;
+			const value = this.get(path);
+			if (entry.group ? value.equals(entry.default) : value === entry.default) continue;
 			results.push({ key: path, value: entry.default, entry });
 		}
 
@@ -222,7 +225,7 @@ class SettingsFolder extends Map {
 	 * message.guild.settings.update('userBlacklist', '272689325521502208');
 	 *
 	 * // Ensuring the function call adds (error if it exists):
-	 * message.guild.settings.update('userBlacklist', '272689325521502208', { arrayAction: 'add' });
+	 * message.guild.settings.update('userBlacklist', '272689325521502208', { action: 'add' });
 	 *
 	 * // Updating it with a json object:
 	 * message.guild.settings.update({ roles: { administrator: '339943234405007361' } });
@@ -288,7 +291,7 @@ class SettingsFolder extends Map {
 		// Queue updates
 		const results = [];
 		for (const [path, previous, value, entry] of values) {
-			if (entry.array ? arraysStrictEquals(value, previous) : value === previous) continue;
+			if (entry.group ? previous.equals(value) : value === previous) continue;
 			results.push({ key: path, value, entry });
 		}
 
@@ -309,6 +312,7 @@ class SettingsFolder extends Map {
 		if (entry.type !== 'Folder') {
 			const value = path ? this.get(this.schema.path ? entry.path.slice(this.schema.path + 1) : entry.path) : this;
 			if (value === null) return 'Not set';
+			// TODO(UnseenFaith): Groups need a display method
 			if (entry.array) return value.length ? `[ ${value.map(val => entry.serializer.stringify(val, message)).join(' | ')} ]` : 'None';
 			return entry.serializer.stringify(value, message);
 		}
@@ -351,14 +355,15 @@ class SettingsFolder extends Map {
 		// Patch before emitting the events or synchronizing other shards
 		const updateObject = {};
 		for (const entry of results) mergeObjects(updateObject, makeObject(entry.key, entry.value));
-		this._patch(updateObject);
 
 		if (status === false) {
 			await this.gateway.provider.create(this.gateway.name, this.base.id, results);
 			this.base.existenceStatus = true;
+			this._patch(updateObject);
 			this.base.gateway.client.emit('settingsCreate', this.base);
 		} else {
 			await this.gateway.provider.update(this.gateway.name, this.id, results);
+			this._patch(updateObject);
 			this.base.gateway.client.emit('settingsUpdate', this.base, results.slice());
 		}
 	}
@@ -379,32 +384,28 @@ class SettingsFolder extends Map {
 		if (isArray) next = await Promise.all(next.map(async val => entry.serializer.serialize(await entry.parse(val, options.guild))));
 		else next = entry.serializer.serialize(await entry.parse(next, options.guild));
 
+		// TODO(UnseenFaith): Move all this logic to the groups
 		if (!entry.array) return next;
 		if (!isArray) next = [next];
 
-		const { arrayAction = 'auto', arrayIndex = null } = options;
-		if (arrayAction === 'overwrite') return next;
+		const { action = 'auto' } = options;
+		if (action === 'overwrite') return next;
 
 		const clone = previous.slice();
-		if (arrayIndex !== null) {
-			if (arrayIndex < 0 || arrayIndex > previous.length + 1) {
-				throw `The index ${arrayIndex} is bigger than the current array. It must be a value in the range of 0..${previous.length + 1}.`;
-			}
-			[clone[arrayIndex]] = next;
-		} else if (arrayAction === 'auto') {
+		if (action === 'auto') {
 			// Array action auto must add or remove values, depending on their existence
 			for (const val of next) {
 				const index = clone.indexOf(val);
 				if (index === -1) clone.push(val);
 				else clone.splice(index, 1);
 			}
-		} else if (arrayAction === 'add') {
+		} else if (action === 'add') {
 			// Array action add must add values, throw on existent
 			for (const val of next) {
 				if (clone.includes(val)) throw `The value ${val} for the key ${entry.path} already exists.`;
 				clone.push(val);
 			}
-		} else if (arrayAction === 'remove') {
+		} else if (action === 'remove') {
 			// Array action remove must add values, throw on non-existent
 			for (const val of next) {
 				const index = clone.indexOf(val);
@@ -412,7 +413,7 @@ class SettingsFolder extends Map {
 				clone.splice(index, 1);
 			}
 		} else {
-			throw `The ${arrayAction} array action is not a valid SettingsUpdateArrayAction.`;
+			throw `The ${action} array action is not a valid SettingsUpdateArrayAction.`;
 		}
 
 		return clone;
@@ -435,7 +436,7 @@ class SettingsFolder extends Map {
 			if (typeof subkey === 'undefined') continue;
 
 			// Patch recursively if the key is a folder, set otherwise
-			if (subkey instanceof SettingsFolder || subkey instanceof SettingsArray) subkey._patch(value);
+			if (subkey instanceof SettingsFolder || subkey instanceof GroupBase) subkey._patch(value);
 			else super.set(key, value);
 		}
 	}
@@ -485,10 +486,11 @@ class SettingsFolder extends Map {
 				const settings = new SettingsFolder(value);
 				folder.set(key, settings);
 				this.init(settings, value);
-			} else if (value.array) {
-				const sArray = new SettingsArray(value);
-				sArray.base = this;
-				folder.set(key, sArray);
+			} else if (value.group) {
+				// eslint-disable-next-line new-cap
+				const group = new value.group(value);
+				group.base = this;
+				folder.set(key, group);
 			} else {
 				folder.set(key, value.default);
 			}

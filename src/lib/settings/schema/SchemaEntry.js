@@ -1,4 +1,8 @@
 const { isFunction, isNumber } = require('../../util/util');
+const GroupBase = require('../group/GroupBase');
+const SettingsArray = require('../group/SettingsArray');
+const SettingsMap = require('../group/SettingsMap');
+// const SettingsSet = require('../group/SettingsSet');
 
 /**
  * The SchemaEntry class that stores the metadata for an entry from the schema
@@ -9,7 +13,6 @@ class SchemaEntry {
 	 * @typedef {Object} SchemaEntryOptions
 	 * @property {*} [default] The default value for the key
 	 * @property {Function} [filter] The filter to use when resolving this key. The function is passed the resolved value from the resolver, and a guild.
-	 * @property {boolean} [array] Whether the key should be stored as Array or not
 	 * @property {boolean} [configurable] Whether the key should be configurable by the configuration command or not
 	 * @property {number} [min] The minimum value for this entry
 	 * @property {number} [max] The maximum value for this entry
@@ -75,18 +78,18 @@ class SchemaEntry {
 		this.type = type.toLowerCase();
 
 		/**
-		 * Whether or not this key should hold an array of data, or a single entry of data
-		 * @since 0.5.0
-		 * @type {boolean}
-		 */
-		this.array = 'array' in options ? options.array : Array.isArray(options.default);
-
-		/**
 		 * The default data this key will revert back to if reset, or if the key is never set
 		 * @since 0.5.0
 		 * @type {*}
 		 */
-		this.default = 'default' in options ? options.default : this._generateDefault();
+		this.default = 'default' in options ? options.default : null;
+
+		/**
+		 * The group class that stores data for this group, `null` for single valuues
+		 * @since 0.5.0
+		 * @type {?Function}
+		 */
+		this.group = this._inferGroupFromDefault();
 
 		/**
 		 * The minimum value for this key.
@@ -149,7 +152,7 @@ class SchemaEntry {
 	 */
 	edit(options = {}) {
 		if ('type' in options) this.type = options.type.toLowerCase();
-		if ('array' in options) this.array = options.array;
+		if ('group' in options) this.group = options.group;
 		if ('configurable' in options) this.configurable = options.configurable;
 		if ('filter' in options) this.filter = options.filter;
 		if ('default' in options) this.default = options.default;
@@ -173,7 +176,7 @@ class SchemaEntry {
 		if (!this.client.serializers.has(this.type)) throw new TypeError(`[KEY] ${this.path} - ${this.type} is not a valid type.`);
 
 		// Check array
-		if (typeof this.array !== 'boolean') throw new TypeError(`[KEY] ${this.path} - Parameter array must be a boolean.`);
+		if (this.group !== null && !(this.group instanceof GroupBase)) throw new TypeError(`[KEY] ${this.path} - Parameter 'group' must be either null or a GroupBase instance.`);
 
 		// Check configurable
 		if (typeof this.configurable !== 'boolean') throw new TypeError(`[KEY] ${this.path} - Parameter configurable must be a boolean.`);
@@ -185,13 +188,6 @@ class SchemaEntry {
 
 		// Check filter
 		if (this.filter !== null && !isFunction(this.filter)) throw new TypeError(`[KEY] ${this.path} - Parameter filter must be a function`);
-
-		// Check default
-		if (this.array) {
-			if (!Array.isArray(this.default)) throw new TypeError(`[DEFAULT] ${this.path} - Default key must be an array if the key stores an array.`);
-		} else if (this.default !== null) {
-			if (['boolean', 'string'].includes(this.type) && typeof this.default !== this.type) throw new TypeError(`[DEFAULT] ${this.path} - Default key must be a ${this.type}.`);
-		}
 
 		return true;
 	}
@@ -206,9 +202,10 @@ class SchemaEntry {
 	async resolve(settings, language, guild) {
 		const value = settings.get(this.path);
 		if (!this.shouldResolve) return value;
-		if (this.array) {
-			const resolved = await Promise.all(value.map(data => this.serializer.deserialize(data, this, language, guild).catch(() => null)));
-			return resolved.filter(val => val !== null);
+		if (this.group) {
+			const promises = [];
+			for (const data of value) promises.push(this.serializer.deserialize(data, this, language, guild).catch(() => null));
+			return Promise.all(promises).filter(val => val !== null);
 		}
 		return this.serializer.deserialize(value, this, language, guild).catch(() => null);
 	}
@@ -234,8 +231,21 @@ class SchemaEntry {
 	 * @private
 	 */
 	_generateDefault() {
-		if (this.array) return [];
 		if (this.type === 'boolean') return false;
+		return null;
+	}
+
+	/**
+	 * Infers the correct group given the default
+	 * @since 0.5.0
+	 * @param {*} defaultValue The default value to infer
+	 * @returns {Function}
+	 * @private
+	 */
+	_inferGroupFromDefault() {
+		if (Array.isArray(this.default)) return SettingsArray;
+		if (this.default instanceof Map) return SettingsMap;
+		// if (this.default instanceof Set) return SettingsSet;
 		return null;
 	}
 
@@ -246,12 +256,14 @@ class SchemaEntry {
 	 */
 	toJSON() {
 		return {
-			array: this.array,
+			group: this.group ? this.group.name : null,
 			configurable: this.configurable,
-			default: this.default,
+			default: this.group ? [...this.default] : this.default,
 			max: this.max,
 			min: this.min,
-			type: this.type
+			type: this.type,
+			inclusive: this.inclusive,
+			resolve: this.resolve
 		};
 	}
 
